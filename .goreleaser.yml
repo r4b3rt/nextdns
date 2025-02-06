@@ -1,9 +1,9 @@
+version: 2
 before:
   hooks:
     - go mod tidy
 builds:
 -
-  id: nextdns-nohttp3
   goos:
   - freebsd
   - netbsd
@@ -14,7 +14,9 @@ builds:
   - windows
   goarch:
   - 386
+  - amd64
   - arm
+  - arm64
   - mips
   - mipsle
   - mips64
@@ -27,23 +29,13 @@ builds:
   - softfloat
   - hardfloat
   env:
-  - CGO_ENABLED=0
--
-  goos:
-  - freebsd
-  - netbsd
-  - openbsd
-  - dragonfly
-  - linux
-  - darwin
-  - windows
-  goarch:
-  - amd64
-  - arm64
-  env:
-  - CGO_ENABLED=0
+  - CGO_ENABLED={{ if eq .Os "darwin" }}1{{ else }}0{{ end }}
   flags:
-  - -tags=http3
+  - -trimpath
+  ignore:
+  -
+    goos: windows
+    goarch: arm64
 archives:
 -
   format_overrides:
@@ -56,10 +48,13 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 release:
+  github:
+    owner: nextdns
+    name: nextdns
   name_template: "{{.ProjectName}}-v{{.Version}}"
 brews:
 -
-  tap:
+  repository:
     owner: nextdns
     name: homebrew-tap
   commit_author:
@@ -69,7 +64,7 @@ brews:
   description: NextDNS DNS/53 to DoH Proxy
   caveats: "To install NextDNS, run the following command:
 
-    sudo nextdns install --config <your_conf_id>
+    sudo nextdns install --profile <your_profile_id>
 
 Then setup your DNS manually to 127.0.0.1 or by running:
 
@@ -105,9 +100,57 @@ nfpms:
     apk:
       scripts:
           postupgrade: ".goreleaser/apk/post-upgrade"
+dockers:
+  - image_templates:
+      - "nextdns/nextdns:{{ .Version }}-amd64"
+    use: buildx
+    dockerfile: Dockerfile
+    build_flag_templates: ["--platform=linux/amd64"]
+  - image_templates:
+      - "nextdns/nextdns:{{ .Version }}-armv7"
+    use: buildx
+    goarch: arm
+    goarm: 7
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - "--platform=linux/arm/v7"
+  - image_templates:
+      - "nextdns/nextdns:{{ .Version }}-arm64"
+    use: buildx
+    goarch: arm64
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - "--platform=linux/arm64"
+docker_manifests:
+  - name_template: "nextdns/nextdns:{{ .Version }}"
+    image_templates:
+      - "nextdns/nextdns:{{ .Version }}-amd64"
+      - "nextdns/nextdns:{{ .Version }}-armv7"
+      - "nextdns/nextdns:{{ .Version }}-arm64"
+  - name_template: "nextdns/nextdns:latest"
+    image_templates:
+      - "nextdns/nextdns:{{ .Version }}-amd64"
+      - "nextdns/nextdns:{{ .Version }}-armv7"
+      - "nextdns/nextdns:{{ .Version }}-arm64"
 changelog:
-  sort: asc
-  filters:
-    exclude:
-    - '^docs:'
-    - '^test:'
+  groups:
+    - title: "✨ New Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "🐛 Bug Fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "⚡ Performance Improvements"
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: "📚 Documentation Updates"
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: "🛠️ Maintenance Changes"
+      regexp: '^.*?chore(\([[:word:]]+\))??!?:.+$'
+      order: 4
+    - title: "🤖 Continuous Integration Changes"
+      regexp: '^.*?ci(\([[:word:]]+\))??!?:.+$'
+      order: 5
+    - title: Others
+      order: 999

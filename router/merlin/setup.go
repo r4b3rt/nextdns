@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
@@ -34,6 +33,10 @@ func New() (*Router, bool) {
 		ListenPort:      "5342",
 		johnFork:        strings.HasPrefix(string(b), "ASUSWRT-Merlin-LTS"),
 	}, true
+}
+
+func (r *Router) String() string {
+	return "merlin"
 }
 
 func (r *Router) Configure(c *config.Config) error {
@@ -82,7 +85,7 @@ func (r *Router) Setup() error {
 func (r *Router) Restore() error {
 	var err error
 	if r.CurrentPostConf != "" {
-		err = ioutil.WriteFile(r.DNSMasqPath, []byte(r.CurrentPostConf), 0755)
+		err = os.WriteFile(r.DNSMasqPath, []byte(r.CurrentPostConf), 0755)
 	} else {
 		err = os.Remove(r.DNSMasqPath)
 		if os.IsNotExist(err) {
@@ -120,8 +123,8 @@ if [ -f /tmp/nextdns.pid ] && [ -d "/proc/$(sed -n '1p' /tmp/nextdns.pid)" ]; th
 	{{- end}}
 	{{- if .ClientReporting}}
 	pc_append "add-mac" "$CONFIG"
-	pc_append "add-subnet=32,128" "$CONFIG"
 	{{- end}}
+	pc_append "add-subnet=32,128" "$CONFIG"
 	exit 0
 fi
 
