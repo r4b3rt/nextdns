@@ -16,7 +16,8 @@ type Config struct {
 	File                 string
 	Listens              []string
 	Control              string
-	Conf                 Configs
+	ConfigDeprecated     Profiles
+	Profile              Profiles
 	Forwarders           Forwarders
 	LogQueries           bool
 	CacheSize            string
@@ -24,6 +25,7 @@ type Config struct {
 	MaxTTL               time.Duration
 	ReportClientInfo     bool
 	DiscoveryDNS         string
+	MDNS                 string
 	DetectCaptivePortals bool
 	BogusPriv            bool
 	UseHosts             bool
@@ -31,6 +33,7 @@ type Config struct {
 	MaxInflightRequests  uint
 	SetupRouter          bool
 	AutoActivate         bool
+	Debug                bool
 }
 
 func (c *Config) Parse(cmd string, args []string, useStorage bool) {
@@ -39,11 +42,15 @@ func (c *Config) Parse(cmd string, args []string, useStorage bool) {
 	}
 	fs := c.flagSet(cmd)
 	fs.Parse(args, useStorage)
+	defaultListen := "localhost:53"
+	if runtime.GOOS == "windows" {
+		defaultListen = "127.0.0.1:53"
+	}
 	if len(c.Listens) == 0 {
-		if runtime.GOOS == "windows" {
-			c.Listens = []string{"127.0.0.1:53"}
-		} else {
-			c.Listens = []string{"localhost:53"}
+		c.Listens = []string{defaultListen}
+	} else {
+		if c.SetupRouter && (len(c.Listens) > 1 || c.Listens[0] != defaultListen) {
+			fmt.Fprintln(fs.flag.Output(), "WARNING: listen is ignored when setup-router is enabled")
 		}
 	}
 }
@@ -80,17 +87,22 @@ func (c *Config) flagSet(cmd string) flagSet {
 		fs.flag = flag.NewFlagSet(" "+cmd, flag.ExitOnError)
 		fs.flag.StringVar(&c.File, "config-file", "", "Custom path to configuration file.")
 	}
+	fs.BoolVar(&c.Debug, "debug", false, "Enable debug logs.")
 	fs.StringsVar(&c.Listens, "listen", "Listen address for UDP DNS proxy server.")
 	fs.StringVar(&c.Control, "control", DefaultControl, "Address to the control socket.")
-	fs.Var(&c.Conf, "config",
-		"NextDNS custom configuration id.\n"+
+	fs.Var(&c.ConfigDeprecated, "config", "deprecated, use -profile instead")
+	fs.Var(&c.Profile, "profile",
+		"NextDNS custom profile id.\n"+
 			"\n"+
-			"The configuration id can be prefixed with a condition that is match for\n"+
+			"The profile id can be prefixed with a condition that is match for\n"+
 			"each query:\n"+
-			"* 10.0.3.0/24=abcdef: A CIDR can be used to restrict a configuration to\n"+
+			"* 10.0.3.0/24=abcdef: A CIDR can be used to restrict a profile to\n"+
 			"  a subnet.\n"+
+			"* 2001:0DB8::/64=abcdef: An IPv6 CIDR.\n"+
 			"* 00:1c:42:2e:60:4a=abcdef: A MAC address can be used to restrict\n"+
-			"  configuration to a specific host on the LAN.\n"+
+			"  profile to a specific host on the LAN.\n"+
+			"* eth0=abcdef: An interface name can be used to restrict a profile\n"+
+			"  to all hosts behind this interface.\n"+
 			"\n"+
 			"This parameter can be repeated. The first match wins.")
 	fs.Var(&c.Forwarders, "forwarder",
@@ -103,7 +115,7 @@ func (c *Config) flagSet(cmd string) flagSet {
 			"A SERVER_ADDR can ben either an IP[:PORT] for DNS53 (unencrypted UDP,\n"+
 			"TCP), or a HTTPS URL for a DNS over HTTPS server. For DoH, a bootstrap\n"+
 			"IP can be specified as follow: https://dns.nextdns.io#45.90.28.0.\n"+
-			"Several servers can be specified, separated by comas to implement\n"+
+			"Several servers can be specified, separated by commas to implement\n"+
 			"failover."+
 			"\n"+
 			"This parameter can be repeated. The first match wins.")
@@ -111,7 +123,7 @@ func (c *Config) flagSet(cmd string) flagSet {
 	fs.StringVar(&c.CacheSize, "cache-size", "0",
 		"Set the size of the cache in byte. Use 0 to disable caching. The value\n"+
 			"can be expressed with unit like kB, MB, GB. The cache is automatically\n"+
-			"flushed when the pointed configuration is updated.")
+			"flushed when the pointed profile is updated.")
 	fs.DurationVar(&c.CacheMaxAge, "cache-max-age", 0,
 		"If set to greater than 0, a cached entry will be considered stale after\n"+
 			"this duration, even if the record's TTL is higher.")
@@ -122,13 +134,17 @@ func (c *Config) flagSet(cmd string) flagSet {
 			"value is however kept in the cache to evaluate cache entries\n"+
 			"freshness. This is best used in conjunction with the cache to force\n"+
 			"clients not to rely on their own cache in order to pick up\n"+
-			"configuration changes faster.")
+			"profile changes faster.")
 	fs.BoolVar(&c.ReportClientInfo, "report-client-info", false,
 		"Embed clients information with queries.")
 	fs.StringVar(&c.DiscoveryDNS, "discovery-dns", "",
 		"The address of a DNS server to be used to discover client names.\n"+
 			"If not defined, the address learned via DHCP will be used. This setting\n"+
 			"is only active if report-client-info is set to true.")
+	fs.StringVar(&c.MDNS, "mdns", "all",
+		"Enable mDNS to discover client information and serve mDNS learned names over DNS.\n"+
+			"Use \"all\" to listen on all interface or an interface name to limit mDNS on a\n"+
+			"specific network interface. Use \"disabled\" to disable mDNS altogether.")
 	fs.BoolVar(&c.DetectCaptivePortals, "detect-captive-portals", false,
 		"Automatic detection of captive portals and fallback on system DNS to\n"+
 			"allow the connection to establish.\n"+
@@ -153,7 +169,7 @@ func (c *Config) flagSet(cmd string) flagSet {
 			"also increase significantly memory usage.")
 	fs.BoolVar(&c.SetupRouter, "setup-router", false,
 		"Automatically configure NextDNS for a router setup.\n"+
-			"Common types of router are detected to integrate gracefuly. Changes\n"+
+			"Common types of router are detected to integrate gracefully. Changes\n"+
 			"applies are undone on daemon exit. The listen option is ignored when\n"+
 			"this option is used.")
 	fs.BoolVar(&c.AutoActivate, "auto-activate", false,
@@ -202,6 +218,17 @@ func (fs flagSet) Parse(args []string, useStorage bool) {
 		if err = cs.LoadConfig(fs.storage); err != nil {
 			fmt.Fprintln(fs.flag.Output(), err)
 			os.Exit(2)
+		}
+	}
+
+	// Migrate from config to profile
+	if len(fs.config.ConfigDeprecated) > 0 {
+		fs.config.Profile = append(fs.config.Profile, fs.config.ConfigDeprecated...)
+		fs.config.ConfigDeprecated = nil
+	}
+	for i, arg := range args {
+		if arg == "-config" {
+			args[i] = "-profile"
 		}
 	}
 

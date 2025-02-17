@@ -17,12 +17,14 @@ import (
 	"github.com/denisbrodbeck/machineid"
 	lru "github.com/hashicorp/golang-lru"
 
+	"github.com/nextdns/nextdns/arp"
 	"github.com/nextdns/nextdns/config"
 	"github.com/nextdns/nextdns/ctl"
 	"github.com/nextdns/nextdns/discovery"
 	"github.com/nextdns/nextdns/host"
 	"github.com/nextdns/nextdns/host/service"
 	"github.com/nextdns/nextdns/hosts"
+	"github.com/nextdns/nextdns/ndp"
 	"github.com/nextdns/nextdns/netstatus"
 	"github.com/nextdns/nextdns/proxy"
 	"github.com/nextdns/nextdns/resolver"
@@ -143,7 +145,7 @@ func run(args []string) error {
 	cmd := args[0]
 	args = args[1:]
 	var c config.Config
-	// When running interactive, ignore config file unless explicitely specified.
+	// When running interactive, ignore config file unless explicitly specified.
 	useStorage := service.CurrentRunMode() == service.RunModeService
 	c.Parse("nextdns "+cmd, args, useStorage)
 
@@ -171,28 +173,50 @@ func run(args []string) error {
 	if err := ctl.Start(); err != nil {
 		log.Errorf("Cannot start control server: %v", err)
 	}
-	defer ctl.Stop()
+	defer func() { _ = ctl.Stop() }()
 	ctl.Command("trace", func(data interface{}) interface{} {
 		buf := make([]byte, 100*1024)
 		n := runtime.Stack(buf, true)
 		return string(buf[:n])
 	})
+	ctl.Command("ndp", func(data interface{}) interface{} {
+		t, err := ndp.Get()
+		if err != nil {
+			return err.Error()
+		}
+		var sb strings.Builder
+		for _, i := range t {
+			fmt.Fprintf(&sb, "%s %s\n", i.IP, i.MAC)
+		}
+		return sb.String()
+	})
+	ctl.Command("arp", func(data interface{}) interface{} {
+		t, err := arp.Get()
+		if err != nil {
+			return err.Error()
+		}
+		var sb strings.Builder
+		for _, i := range t {
+			fmt.Fprintf(&sb, "%s %s\n", i.IP, i.MAC)
+		}
+		return sb.String()
+	})
 
 	if c.SetupRouter {
 		r := router.New()
 		if err := r.Configure(&c); err != nil {
-			log.Errorf("Configuring router: %v", err)
+			log.Errorf("Configuring %s router: %v", r, err)
 		}
 		p.OnStarted = append(p.OnStarted, func() {
-			log.Info("Setting up router")
+			log.Infof("Setting up %s router", r)
 			if err := r.Setup(); err != nil {
-				log.Errorf("Setting up router: %v", err)
+				log.Errorf("Setting up %s router: %v", r, err)
 			}
 		})
 		p.OnStopped = append(p.OnStopped, func() {
-			log.Info("Restore router settings")
+			log.Infof("Restore %s router settings", r)
 			if err := r.Restore(); err != nil {
-				log.Errorf("Restore router settings: %v", err)
+				log.Errorf("Restore %s router settings: %v", r, err)
 			}
 		})
 	}
@@ -219,7 +243,7 @@ func run(args []string) error {
 				"User-Agent": []string{fmt.Sprintf("nextdns-cli/%s (%s; %s; %s)", version, platform, runtime.GOARCH, host.InitType())},
 			},
 		},
-		Manager: nextdnsEndpointManager(log, func() bool {
+		Manager: nextdnsEndpointManager(log, c.Debug, func() bool {
 			// Backward compat: the captive portal is now somewhat always enabled,
 			// but for those who enabled it in the past, disable the delay after which
 			// the fallback is disabled.
@@ -262,12 +286,17 @@ func run(args []string) error {
 	p.resolver.DNS53.MaxTTL = maxTTL
 	p.resolver.DOH.MaxTTL = maxTTL
 
-	if len(c.Conf) == 0 || (len(c.Conf) == 1 && c.Conf.Get(nil, nil) != "") {
+	if len(c.Profile) == 0 || (len(c.Profile) == 1 && c.Profile.Get(nil, nil, nil) != "") {
 		// Optimize for no dynamic configuration.
-		p.resolver.DOH.URL = "https://dns.nextdns.io/" + c.Conf.Get(nil, nil)
+		profile := c.Profile.Get(nil, nil, nil)
+		profileURL := "https://dns.nextdns.io/" + profile
+		p.resolver.DOH.GetProfileURL = func(q query.Query) (url, profile string) {
+			return profileURL, profile
+		}
 	} else {
-		p.resolver.DOH.GetURL = func(q query.Query) string {
-			return "https://dns.nextdns.io/" + c.Conf.Get(q.PeerIP, q.MAC)
+		p.resolver.DOH.GetProfileURL = func(q query.Query) (url, profile string) {
+			profile = c.Profile.Get(q.PeerIP, q.LocalIP, q.MAC)
+			return "https://dns.nextdns.io/" + profile, profile
 		}
 	}
 
@@ -290,15 +319,19 @@ func run(args []string) error {
 		enableDiscovery := !localhostMode
 		var r discovery.Resolver
 		if enableDiscovery {
-			discoverMDNS := &discovery.MDNS{OnError: func(err error) { log.Errorf("mdns: %v", err) }}
-			p.OnInit = append(p.OnInit, func(ctx context.Context) {
-				log.Info("Starting mDNS discovery")
-				if err := discoverMDNS.Start(ctx); err != nil {
-					log.Errorf("Cannot start mDNS: %v", err)
-				}
-			})
 			discoverDHCP := &discovery.DHCP{OnError: func(err error) { log.Errorf("dhcp: %v", err) }}
 			discoverDNS := &discovery.DNS{Upstream: c.DiscoveryDNS}
+			var discoverMDNS discovery.Source = discovery.Dummy{}
+			if c.MDNS != "disabled" {
+				mdns := &discovery.MDNS{OnError: func(err error) { log.Errorf("mdns: %v", err) }}
+				discoverMDNS = mdns
+				p.OnInit = append(p.OnInit, func(ctx context.Context) {
+					log.Info("Starting mDNS discovery")
+					if err := mdns.Start(ctx, c.MDNS); err != nil {
+						log.Errorf("Cannot start mDNS: %v", err)
+					}
+				})
+			}
 			discoveryResolver := discovery.Resolver{discoverMDNS, discoverDHCP}
 			if c.DiscoveryDNS != "" {
 				// Only include discovery DNS as discovery resolver if
@@ -307,7 +340,15 @@ func run(args []string) error {
 				discoveryResolver = append(discovery.Resolver{discoverDNS}, discoveryResolver...)
 			}
 			p.Proxy.DiscoveryResolver = discoveryResolver
-			r = discovery.Resolver{discoverHosts, &discovery.Merlin{}, &discovery.Ubios{}, discoverMDNS, discoverDHCP, discoverDNS}
+			r = discovery.Resolver{
+				discoverHosts,
+				&discovery.Merlin{},
+				&discovery.Ubios{},
+				&discovery.Firewalla{},
+				discoverMDNS,
+				discoverDHCP,
+				discoverDNS,
+			}
 			ctl.Command("discovered", func(data interface{}) interface{} {
 				d := map[string]map[string][]string{}
 				r.Visit(func(source, name string, addrs []string) {
@@ -319,7 +360,7 @@ func run(args []string) error {
 				return d
 			})
 		}
-		setupClientReporting(p, &c.Conf, r)
+		setupClientReporting(p, &c.Profile, r)
 	}
 	if p.Proxy.DiscoveryResolver == nil && c.DiscoveryDNS != "" {
 		p.Proxy.DiscoveryResolver = &discovery.DNS{Upstream: c.DiscoveryDNS}
@@ -348,11 +389,16 @@ func run(args []string) error {
 		if !q.FromCache {
 			dur = fmt.Sprintf("%dms", q.Duration/time.Millisecond)
 		}
-		log.Infof("Query %s %s %s %s (qry=%d/res=%d) %s %s%s",
+		profile := q.Profile
+		if profile == "" {
+			profile = "none"
+		}
+		log.Infof("Query %s %s %s %s %s (qry=%d/res=%d) %s %s%s",
 			q.PeerIP.String(),
 			q.Protocol,
 			q.Type,
 			q.Name,
+			profile,
 			q.QuerySize,
 			q.ResponseSize,
 			dur,
@@ -419,7 +465,7 @@ func isLocalhostMode(c *config.Config) bool {
 
 // nextdnsEndpointManager returns a endpoint.Manager configured to connect to
 // NextDNS using different steering techniques.
-func nextdnsEndpointManager(log host.Logger, canFallback func() bool) *endpoint.Manager {
+func nextdnsEndpointManager(log host.Logger, debug bool, canFallback func() bool) *endpoint.Manager {
 	m := &endpoint.Manager{
 		Providers: []endpoint.Provider{
 			// Prefer unicast routing.
@@ -498,12 +544,18 @@ func nextdnsEndpointManager(log host.Logger, canFallback func() bool) *endpoint.
 		}
 		return 0 // use default MinTestInterval
 	}
+	if debug {
+		m.DebugLog = func(msg string) {
+			log.Debug(msg)
+		}
+	}
 	return m
 }
 
-func setupClientReporting(p *proxySvc, conf *config.Configs, r discovery.Resolver) {
+func setupClientReporting(p *proxySvc, conf *config.Profiles, r discovery.Resolver) {
 	deviceName, _ := host.Name()
 	deviceID, _ := machineid.ProtectedID("NextDNS")
+	deviceModel := host.Model()
 	if len(deviceID) > 5 {
 		// No need to be globally unique.
 		deviceID = deviceID[:5]
@@ -517,7 +569,7 @@ func setupClientReporting(p *proxySvc, conf *config.Configs, r discovery.Resolve
 			ci.IP = q.PeerIP.String()
 			ci.Name = normalizeName(r.LookupAddr(q.PeerIP.String()))
 			if q.MAC != nil {
-				ci.ID = shortID(conf.Get(q.PeerIP, q.MAC), q.MAC)
+				ci.ID = shortID(conf.Get(q.PeerIP, q.LocalIP, q.MAC), q.MAC)
 				hex := q.MAC.String()
 				if len(hex) >= 8 {
 					// Only send the manufacturer part of the MAC.
@@ -528,13 +580,14 @@ func setupClientReporting(p *proxySvc, conf *config.Configs, r discovery.Resolve
 				}
 			}
 			if ci.ID == "" {
-				ci.ID = shortID(conf.Get(q.PeerIP, q.MAC), q.PeerIP)
+				ci.ID = shortID(conf.Get(q.PeerIP, q.LocalIP, q.MAC), q.PeerIP)
 			}
 			return
 		}
 
 		ci.ID = deviceID
 		ci.Name = deviceName
+		ci.Model = deviceModel
 		return
 	}
 }
@@ -550,7 +603,7 @@ func normalizeName(names []string) string {
 	return name
 }
 
-// shortID derives a non reversable 5 char long non globally unique ID from the
+// shortID derives a non reversible 5 char long non globally unique ID from the
 // the config + a device ID so device could not be tracked across configs.
 func shortID(confID string, deviceID []byte) string {
 	// Concat

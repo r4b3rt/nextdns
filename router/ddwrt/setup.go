@@ -28,6 +28,10 @@ func New() (*Router, bool) {
 	}, true
 }
 
+func (r *Router) String() string {
+	return "ddwrt"
+}
+
 func (r *Router) Configure(c *config.Config) error {
 	c.Listens = []string{"127.0.0.1:" + r.ListenPort}
 	r.ClientReporting = c.ReportClientInfo
@@ -119,7 +123,7 @@ no-resolv
 server=127.0.0.1#{{.ListenPort}}
 {{- if .ClientReporting}}
 add-mac
-add-subnet=32,128
 {{- end}}
+add-subnet=32,128
 {{- end}}
 `

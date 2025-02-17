@@ -14,7 +14,11 @@ func svc(args []string) error {
 	args = args[1:]
 	var c config.Config
 	if cmd == "install" {
-		c.Parse("nextdns "+cmd, args, true)
+		// Reset the stored configuration when install is provided with
+		// parameters. Only exception is if the only param is -bogus-priv as a
+		// backward compatibility with post upgrade scripts in deb/rpm packages.
+		useStorage := len(args) == 0 || (len(args) == 1 && args[0] == "-bogus-priv")
+		c.Parse("nextdns "+cmd, args, useStorage)
 	}
 
 	svcArgs := []string{"run"}
@@ -36,9 +40,11 @@ func svc(args []string) error {
 	case "install":
 		_ = s.Stop()
 		_ = s.Uninstall()
-		if err := c.Save(); err != nil {
-			fmt.Printf("Cannot write config: %v\n", err)
-			os.Exit(1)
+		if len(args) > 0 {
+			if err := c.Save(); err != nil {
+				fmt.Printf("Cannot write config: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		err := s.Install()
 		if err == nil {
@@ -73,6 +79,14 @@ func svc(args []string) error {
 		fmt.Println(status)
 		return nil
 	case "log":
+		if len(args) > 0 {
+			// If user requests log following, otherwise fall through
+			// to default behaviour.
+			if args[0] == "-f" || args[0] == "--follow" {
+				return host.FollowLog("nextdns")
+			}
+		}
+
 		l, err := host.ReadLog("nextdns")
 		fmt.Printf("%s", l)
 		return err

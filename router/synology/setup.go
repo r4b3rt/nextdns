@@ -3,7 +3,6 @@ package synology
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
@@ -32,8 +31,12 @@ func New() (*Router, bool) {
 	}, true
 }
 
+func (r *Router) String() string {
+	return "synology"
+}
+
 func (r *Router) Configure(c *config.Config) error {
-	if b, err := ioutil.ReadFile("/etc/dhcpd/dhcpd.info"); err != nil || !bytes.HasPrefix(b, []byte(`enable="yes"`)) {
+	if b, err := os.ReadFile("/etc/dhcpd/dhcpd.info"); err != nil || !bytes.HasPrefix(b, []byte(`enable="yes"`)) {
 		// DHCP is disabled, listen on 53 directly
 		c.Listens = []string{":53"}
 		r.disabled = true
@@ -61,7 +64,7 @@ func (r *Router) setupDNSMasq() error {
 		return err
 	}
 	infoFile := strings.Replace(r.DNSMasqPath, ".conf", ".info", 1)
-	if err := ioutil.WriteFile(infoFile, []byte(`enable="yes"`), 0644); err != nil {
+	if err := os.WriteFile(infoFile, []byte(`enable="yes"`), 0644); err != nil {
 		return err
 	}
 	return restartDNSMasq()
@@ -95,7 +98,7 @@ no-resolv
 server=127.0.0.1#{{.ListenPort}}
 {{- if .ClientReporting}}
 add-mac
-add-subnet=32,128
 {{- end}}
+add-subnet=32,128
 {{- end}}
 `

@@ -17,6 +17,7 @@ type Query struct {
 	RecursionDesired bool
 	MsgSize          uint16
 	Name             string
+	LocalIP          net.IP
 	PeerIP           net.IP
 	MAC              net.HardwareAddr
 	Payload          []byte
@@ -110,8 +111,9 @@ const maxDNSSize = 512
 // New lasily parses payload and extract the queried name, ip/MAC if
 // present in the query as EDNS0 extension. ARP queries are performed to find
 // MAC or IP depending on which one is present or not in the query.
-func New(payload []byte, peerIP net.IP) (Query, error) {
+func New(payload []byte, peerIP, localIP net.IP) (Query, error) {
 	q := Query{
+		LocalIP: localIP,
 		PeerIP:  peerIP,
 		MsgSize: maxDNSSize,
 		Payload: payload,
@@ -187,20 +189,21 @@ func (qry *Query) parse() error {
 					}
 					switch o.Data[1] {
 					case 0x1: // IPv4
-						if o.Data[2] != 32 {
+						if o.Data[2] == 32 {
 							// Only consider full IPs
-							continue
+							qry.PeerIP = net.IP(o.Data[4:8])
 						}
-						qry.PeerIP = net.IP(o.Data[4:8])
+
+						// Avoid leaking ECS to the upstream.
+						nutterECSOption(qry.Payload, o)
 					case 0x2: // IPv6
-						if len(o.Data) < 20 {
-							continue
-						}
-						if o.Data[2] != 128 {
+						if o.Data[2] == 128 && len(o.Data) >= 20 {
 							// Only consider full IPs
-							continue
+							qry.PeerIP = net.IP(o.Data[4:20])
 						}
-						qry.PeerIP = net.IP(o.Data[4:20])
+
+						// Avoid leaking ECS to the upstream.
+						nutterECSOption(qry.Payload, o)
 					}
 				}
 			}
@@ -209,4 +212,25 @@ func (qry *Query) parse() error {
 	}
 
 	return nil
+}
+
+func nutterECSOption(payload []byte, o dnsmessage.Option) {
+	off := o.DataOffset - 4
+	if off < 0 || off+4 >= len(payload) {
+		return
+	}
+	size := int(payload[off+3]) // ECS option length is never > 2^8
+	endOff := off + 4 + size
+	if endOff > len(payload) {
+		return
+	}
+	// Zero all bits of the ECS option
+	for i := o.DataOffset; i < endOff; i++ {
+		payload[i] = 0
+	}
+	// Set the ECS option to an invalid value to avoid the upstream treating
+	// treating the presence of the option with a /0 as a request to not send
+	// ECS to its own upstream.
+	payload[off] = 0xFF
+	payload[off+1] = 0xFF
 }

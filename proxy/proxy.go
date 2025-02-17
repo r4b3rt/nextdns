@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nextdns/nextdns/hosts"
+	"github.com/nextdns/nextdns/internal/dnsmessage"
 	"github.com/nextdns/nextdns/resolver"
 	"github.com/nextdns/nextdns/resolver/query"
 )
@@ -16,6 +17,7 @@ import (
 // QueryInfo provides information about a DNS query handled by Proxy.
 type QueryInfo struct {
 	Protocol          string
+	Profile           string
 	PeerIP            net.IP
 	Type              string
 	Name              string
@@ -146,7 +148,7 @@ func (p Proxy) ListenAndServe(ctx context.Context) error {
 	<-ctx.Done()
 	errs <- ctx.Err()
 	for _, close := range closeAll {
-		close()
+		_ = close()
 	}
 	// Wait for the two sockets (+ ctx err) to be terminated and return the
 	// initial error.
@@ -169,7 +171,9 @@ func (p Proxy) Resolve(ctx context.Context, q query.Query, buf []byte) (n int, i
 		}
 	}
 
-	if !p.BogusPriv || q.Type != query.TypePTR || !isPrivateReverse(q.Name) {
+	priv := q.Type == query.TypePTR && isPrivateReverse(q.Name)
+
+	if !p.BogusPriv || !priv {
 		n, i, err = p.Upstream.Resolve(ctx, q, buf)
 	}
 
@@ -177,6 +181,11 @@ func (p Proxy) Resolve(ctx context.Context, q query.Query, buf []byte) (n int, i
 		if _n, _i, _err := hostsResolve(p.DiscoveryResolver, q, buf); _err == nil {
 			return _n, _i, nil
 		}
+	}
+
+	if p.BogusPriv && priv {
+		n = replyRCode(dnsmessage.RCodeNameError, q, buf)
+		return n, i, nil
 	}
 
 	return n, i, err

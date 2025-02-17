@@ -12,6 +12,7 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
+	"github.com/nextdns/nextdns/internal/dnsmessage"
 	"github.com/nextdns/nextdns/resolver"
 	"github.com/nextdns/nextdns/resolver/query"
 )
@@ -63,7 +64,7 @@ func (p Proxy) serveUDP(l net.PacketConn, inflightRequests chan struct{}) error 
 		qsize, lip, raddr, err := readUDP(c, buf)
 		if err != nil {
 			<-inflightRequests
-			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				bpool.Put(&buf)
 				continue
 			}
@@ -79,7 +80,7 @@ func (p Proxy) serveUDP(l net.PacketConn, inflightRequests chan struct{}) error 
 			var err error
 			var rsize int
 			var ri resolver.ResolveInfo
-			q, err := query.New(buf[:qsize], addrIP(raddr))
+			q, err := query.New(buf[:qsize], addrIP(raddr), lip)
 			if err != nil {
 				p.logErr(err)
 			}
@@ -101,6 +102,7 @@ func (p Proxy) serveUDP(l net.PacketConn, inflightRequests chan struct{}) error 
 					QuerySize:         qsize,
 					ResponseSize:      rsize,
 					Duration:          time.Since(start),
+					Profile:           ri.Profile,
 					FromCache:         ri.FromCache,
 					UpstreamTransport: ri.Transport,
 					Error:             err,
@@ -113,7 +115,7 @@ func (p Proxy) serveUDP(l net.PacketConn, inflightRequests chan struct{}) error 
 				defer cancel()
 			}
 			if rsize, ri, err = p.Resolve(ctx, q, rbuf); err != nil || rsize <= 0 || rsize > maxTCPSize {
-				rsize = replyServFail(q, rbuf)
+				rsize = replyRCode(dnsmessage.RCodeServerFailure, q, rbuf)
 			}
 			if rsize > maxUDPSize && (rsize > int(q.MsgSize) || rsize > maxDNS0Size) {
 				if q.MsgSize > maxUDPSize {

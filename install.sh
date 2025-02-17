@@ -98,8 +98,27 @@ uninstall() {
     fi
 }
 
+precheck() {
+    if [ -e "/data/unifi" ] && [ -f "/run/dnsfilter/dnsfilter" ]; then
+        log_warn "UDM Content Filtering and/or Ad Blocking feature is enabled."
+        log_warn "Please disable it to use NextDNS."
+        log_warn ""
+        log_warn "  To disable Content Filtering, go to Settings > Network."
+        log_warn "  For each network, set the Content Filtering feature to None."
+        log_warn ""
+        log_warn "  To disable Ad Blocking, go to Settings > Application Firewall"
+        log_warn "  In the General tab, uncheck the Ad Blocking checkbox."
+        log_warn ""
+        while [ -f "/run/dnsfilter/dnsfilter" ]; do
+            sleep 1
+        done
+        log_info "Content Filtering feature successfully disabled."
+    fi
+}
+
 configure() {
     log_debug "Start configure"
+    precheck
     args=""
     add_arg() {
         for value in $2; do
@@ -117,7 +136,8 @@ configure() {
         # shellcheck disable=SC2046
         add_arg "$arg" $(ask_bool "$msg" "$default")
     }
-    add_arg config "$(get_config_id)"
+    # Use profile from now on
+    add_arg profile "$(get_profile_id)"
 
     doc "Sending your devices name lets you filter analytics and logs by device."
     add_arg_bool_ask report-client-info 'Report device name?' true
@@ -137,7 +157,7 @@ configure() {
         ;;
     esac
 
-    doc "Make nextdns CLI cache responses. This improves latency and reduces the amount"
+    doc "Make NextDNS CLI cache responses. This improves latency and reduces the amount"
     doc "of queries sent to NextDNS."
     if [ "$(guess_host_type)" = "router" ]; then
         doc "Note that enabling this feature will disable dnsmasq for DNS to avoid double"
@@ -151,7 +171,7 @@ configure() {
 
         doc "Instant refresh will force low TTL on responses sent to clients so they rely"
         doc "on CLI DNS cache. This will allow changes on your NextDNS config to be applied"
-        doc "on you LAN hosts without having to wait for their cache to expire."
+        doc "on your LAN hosts without having to wait for their cache to expire."
         if [ "$(get_config max-ttl)" = "5s" ]; then
             instant_refresh_default=true
         fi
@@ -161,7 +181,7 @@ configure() {
     fi
 
     if [ "$(guess_host_type)" != "router" ]; then
-        doc "Changes DNS settings of the host automatically when nextdns is started."
+        doc "Changes DNS settings of the host automatically when NextDNS is started."
         doc "If you say no here, you will have to manually configure DNS to 127.0.0.1."
         add_arg_bool_ask auto-activate 'Automatically setup local host DNS?' true
     fi
@@ -173,10 +193,10 @@ post_install() {
     println
     println "Congratulations! NextDNS is now installed."
     println
-    println "To upgrade/uninstall, run this command again and select the approriate option."
+    println "To upgrade/uninstall, run this command again and select the appropriate option."
     println
-    println "You can use the nextdns command to control the daemon."
-    println "Here is a few important commands to know:"
+    println "You can use the NextDNS command to control the daemon."
+    println "Here are a few important commands to know:"
     println
     println "# Start, stop, restart the daemon:"
     println "nextdns start"
@@ -269,21 +289,40 @@ uninstall_zypper() {
     esac
 }
 
-install_deb() {
+install_deb_keyring() {
     # Fallback on curl, some debian based distrib don't have wget while debian
     # doesn't have curl by default.
-    ( asroot wget -qO /usr/share/keyrings/nextdns.gpg https://repo.nextdns.io/nextdns.gpg ||
-      asroot curl -sfL https://repo.nextdns.io/nextdns.gpg -o /usr/share/keyrings/nextdns.gpg ) &&
-        asroot sh -c 'echo "deb [signed-by=/usr/share/keyrings/nextdns.gpg] https://repo.nextdns.io/deb stable main" > /etc/apt/sources.list.d/nextdns.list' &&
+    asroot mkdir -p /etc/apt/keyrings
+    ( asroot wget -qO /etc/apt/keyrings/nextdns.gpg https://repo.nextdns.io/nextdns.gpg ||
+      asroot curl -sfL https://repo.nextdns.io/nextdns.gpg -o /etc/apt/keyrings/nextdns.gpg ) &&
+        asroot chmod 0644 /etc/apt/keyrings/nextdns.gpg
+}
+
+install_source() {
+    if [ ! -f /etc/apt/sources.list.d/nextdns.list ]; then
+        asroot sh -c 'echo "deb [signed-by=/etc/apt/keyrings/nextdns.gpg] https://repo.nextdns.io/deb stable main" > /etc/apt/sources.list.d/nextdns.list' &&
         (dpkg --compare-versions $(dpkg-query --showformat='${Version}' --show apt) ge 1.1 ||
-         asroot ln -s /usr/share/keyrings/nextdns.gpg /etc/apt/trusted.gpg.d/.) &&
+         asroot ln -s /etc/apt/keyrings/nextdns.gpg /etc/apt/trusted.gpg.d/.)
+    fi
+
+    if [ -f /etc/default/ubnt-dpkg-cache ]; then
+        # On UnifiOS 2, make sure the package is persisted over upgrades
+        sed -e '/^DPKG_CACHE_UBNT_PKGS+=" nextdns"/{:a;n;ba;q}' \
+            -e '$aDPKG_CACHE_UBNT_PKGS+=" nextdns"' \
+            -i /etc/default/ubnt-dpkg-cache
+    fi
+}
+
+install_deb() {
+    install_deb_keyring && install_source &&
         (test "$OS" = "debian" && asroot apt-get -y install apt-transport-https || true) &&
-        asroot apt-get update &&
+        (asroot apt-get update || true) &&
         asroot apt-get install -y nextdns
 }
 
 upgrade_deb() {
-    asroot apt-get update &&
+    install_deb_keyring && install_source &&
+        (asroot apt-get update || true) &&
         asroot apt-get install -y nextdns
 }
 
@@ -456,12 +495,13 @@ uninstall_opnsense() {
 }
 
 ubios_install_source() {
-    echo "deb [signed-by=/usr/share/keyrings/nextdns.gpg] https://repo.nextdns.io/deb stable main" > /tmp/nextdns.list
-    podman cp /tmp/nextdns.list unifi-os:/etc/apt/sources.list.d/nextdns.list
+    echo "deb [signed-by=/etc/apt/keyrings/nextdns.gpg] https://repo.nextdns.io/deb stable main" > /data/nextdns.list
+    podman exec unifi-os mv /data/nextdns.list /etc/apt/sources.list.d/nextdns.list
     rm -f /tmp/nextdns.list
     podman exec unifi-os apt-get install -y gnupg1 curl
-    podman exec unifi-os curl -sfL https://repo.nextdns.io/nextdns.gpg -o /usr/share/keyrings/nextdns.gpg
-    podman exec unifi-os apt-get update -o Dir::Etc::sourcelist="sources.list.d/nextdns.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+    podman exec unifi-os mkdir -p /etc/apt/keyrings/
+    podman exec unifi-os curl -sfL https://repo.nextdns.io/nextdns.gpg -o /etc/apt/keyrings/nextdns.gpg
+    podman exec unifi-os apt-get update -o Dir::Etc::sourcelist="sources.list.d/nextdns.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" || true
 }
 
 install_ubios() {
@@ -510,18 +550,14 @@ install_type() {
     centos|fedora|rhel)
         echo "rpm"
         ;;
-    opensuse-tumbleweed|opensuse-leap|opensuse)
+    opensuse-tumbleweed|opensuse-leap|opensuse-slowroll|opensuse)
         echo "zypper"
         ;;
-    debian|ubuntu|elementary|raspbian|linuxmint|pop|neon|sparky|vyos|Deepin)
+    debian|ubuntu|elementary|raspbian|linuxmint|pop|neon|sparky|Deepin)
         echo "deb"
         ;;
     alpine)
         echo "apk"
-        ;;
-    arch|manjaro)
-        #echo "arch" # TODO: fix AUR install
-        echo "bin"
         ;;
     openwrt)
         # shellcheck disable=SC1091
@@ -533,7 +569,7 @@ install_type() {
                     # No opkg support before 19.07.0-rc2
                     echo "bin"
                 else
-                    # Likely 'snapshot' bulid in this case, but still > major version 19
+                    # Likely 'snapshot' build in this case, but still > major version 19
                     echo "openwrt"
                 fi
                 ;;
@@ -550,14 +586,11 @@ install_type() {
     asuswrt-merlin)
         echo "merlin"
         ;;
-    edgeos|synology|clear-linux-os|solus|openbsd|netbsd|overthebox)
-        echo "bin"
-        ;;
     ddwrt)
         echo "ddwrt"
         ;;
     darwin)
-        if [ -x /usr/local/bin/brew ]; then
+        if [ -x /usr/local/bin/brew ] || [ -x /opt/homebrew/bin/brew ]; then
             echo "brew"
         else
             log_debug "Homebrew not installed, fallback on binary install"
@@ -576,8 +609,7 @@ install_type() {
     ubios)
         echo "ubios"
         ;;
-    void)
-        # TODO: pkg for xbps
+    arch|manjaro|steamos|edgeos|synology|clear-linux-os|solus|openbsd|netbsd|overthebox|vyos|firewalla|void|gentoo)
         echo "bin"
         ;;
     *)
@@ -601,32 +633,40 @@ get_config_bool() {
     echo "$2"
 }
 
-get_config_id() {
-    log_debug "Get configuration ID"
-    while [ -z "$CONFIG_ID" ]; do
+get_profile_id() {
+    log_debug "Get profile ID"
+    if [ "$CONFIG_ID" ]; then
+        # backward compat
+        PROFILE_ID="$CONFIG_ID"
+    fi
+    while [ -z "$PROFILE_ID" ]; do
         default=
-        prev_id=$(get_config config)
+        prev_id=$(get_config profile)
+        if [ -z "$prev_id" ]; then
+            # backward compat
+            prev_id=$(get_config config)
+        fi
         if [ "$prev_id" ]; then
-            log_debug "Previous config ID: $prev_id"
+            log_debug "Previous profile ID: $prev_id"
             default=" (default=$prev_id)"
         fi
-        print "NextDNS Configuration ID%s: " "$default"
+        print "NextDNS Profile ID%s: " "$default"
         read -r id
         if [ -z "$id" ]; then
             id=$prev_id
         fi
         if echo "$id" | grep -qE '^[0-9a-f]{6}$'; then
-            CONFIG_ID=$id
+            PROFILE_ID=$id
             break
         else
-            log_error "Invalid configuration ID."
+            log_error "Invalid profile ID."
             println
             println "ID format is 6 alphanumerical lowercase characters (example: 123abc)."
             println "Your ID can be found on the Setup tab of https://my.nextdns.io."
             println
         fi
     done
-    echo "$CONFIG_ID"
+    echo "$PROFILE_ID"
 }
 
 log_debug() {
@@ -637,6 +677,10 @@ log_debug() {
 
 log_info() {
     printf "INFO: %s\n" "$*" >&2
+}
+
+log_warn() {
+    printf "\033[33mWARN: %s\033[0m\n" "$*" >&2
 }
 
 log_error() {
@@ -747,16 +791,16 @@ ask_bool() {
 
 detect_endiannes() {
     if ! hexdump /dev/null 2>/dev/null; then
-        # Some firmware do not contain hexdump, for those, try to detect endiannes
-        # differently
+        # Some firmwares do not contain hexdump, for those, try to detect endianness
+        # differently.
         case $(cat /proc/cpuinfo) in
         *BCM5300*)
-            # RT-AC66U does not support merlin version over 380.70 which
-            # lack hexdump command.
+            # RT-AC66U does not support Merlin version over 380.70 which
+            # lacks hexdump command.
             echo "le"
             ;;
         *)
-            log_error "Cannot determine endiannes"
+            log_error "Cannot determine endianness"
             return 1
             ;;
         esac
@@ -784,7 +828,7 @@ detect_goarch() {
         echo "386"
         ;;
     arm)
-        # Freebsd does not include arm version
+        # FreeBSD does not include arm version
         case "$(sysctl -b hw.model 2>/dev/null)" in
         *A9*)
             echo "armv7"
@@ -872,6 +916,9 @@ detect_os() {
             if uname -u 2>/dev/null | grep -q '^synology'; then
                 echo "synology"; return 0
             fi
+            if [ -f "/etc/firewalla_release" ]; then
+                echo "firewalla"; return 0
+            fi
             # shellcheck disable=SC1091
             dist=$(. /etc/os-release; echo "$ID")
             case $dist in
@@ -882,14 +929,14 @@ detect_os() {
                 fi
                 echo "$dist"; return 0
                 ;;
-            debian|ubuntu|elementary|raspbian|centos|fedora|rhel|arch|manjaro|openwrt|clear-linux-os|linuxmint|opensuse-tumbleweed|opensuse-leap|opensuse|solus|pop|neon|overthebox|sparky|vyos|void|alpine|Deepin)
+            debian|ubuntu|elementary|raspbian|centos|fedora|rhel|arch|manjaro|openwrt|clear-linux-os|linuxmint|opensuse-tumbleweed|opensuse-leap|opensuse|solus|pop|neon|overthebox|sparky|vyos|void|alpine|Deepin|gentoo|steamos)
                 echo "$dist"; return 0
                 ;;
             esac
             # shellcheck disable=SC1091
             for dist in $(. /etc/os-release; echo "$ID_LIKE"); do
                 case $dist in
-                debian|ubuntu|rhel|fedora|openwrt)
+                debian|ubuntu|rhel|fedora|openwrt|arch)
                     log_debug "Using ID_LIKE"
                     echo "$dist"; return 0
                     ;;
@@ -942,10 +989,10 @@ guess_host_type() {
     fi
 
     case $OS in
-    pfsense|opnsense|openwrt|asuswrt-merlin|edgeos|ddwrt|synology|overthebox|ubios)
+    pfsense|opnsense|openwrt|asuswrt-merlin|edgeos|ddwrt|synology|overthebox|ubios|vyos|firewalla)
         echo "router"
         ;;
-    darwin)
+    darwin|steamos)
         echo "workstation"
         ;;
     *)
@@ -955,7 +1002,7 @@ guess_host_type() {
 }
 
 asroot() {
-    # Some platform (merlin) do not have the "id" command and $USER report a non root username with uid 0.
+    # Some platform (Merlin) do not have the "id" command and $USER report a non root username with uid 0.
     if [ "$(grep '^Uid:' /proc/$$/status 2>/dev/null|cut -f2)" = "0" ] || [ "$USER" = "root" ] || [ "$(id -u 2>/dev/null)" = "0" ]; then
         "$@"
     elif [ "$(command -v sudo 2>/dev/null)" ]; then
@@ -980,17 +1027,17 @@ silent_exec() {
 
 bin_location() {
     case $OS in
-    centos|fedora|rhel|debian|ubuntu|elementary|raspbian|arch|manjaro|clear-linux-os|linuxmint|opensuse-tumbleweed|opensuse-leap|opensuse|solus|pop|neon|sparky|vyos|void|alpine|Deepin)
+    centos|fedora|rhel|debian|ubuntu|elementary|raspbian|arch|manjaro|clear-linux-os|linuxmint|opensuse-tumbleweed|opensuse-leap|opensuse|solus|pop|neon|sparky|alpine|Deepin|gentoo)
         echo "/usr/bin/nextdns"
         ;;
     openwrt|overthebox)
         echo "/usr/sbin/nextdns"
         ;;
-    synology)
+    synology|firewalla)
         echo "/usr/local/bin/nextdns"
-	;;
+    ;;
     darwin)
-	echo "$(brew --prefix 2>/dev/null || echo /usr/local)/bin/nextdns"
+        echo "$(brew --prefix 2>/dev/null || echo /usr/local)/bin/nextdns"
         ;;
     asuswrt-merlin|ddwrt)
         echo "/jffs/nextdns/nextdns"
@@ -998,11 +1045,14 @@ bin_location() {
     freebsd|pfsense|opnsense|netbsd|openbsd)
         echo "/usr/local/sbin/nextdns"
         ;;
-    edgeos)
+    edgeos|vyos)
         echo "/config/nextdns/nextdns"
         ;;
     ubios)
         echo "/data/nextdns"
+        ;;
+    steamos)
+        echo "$HOME/.local/bin/nextdns"
         ;;
     *)
         log_error "Unknown bin location for $OS"

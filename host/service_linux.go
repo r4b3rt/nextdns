@@ -5,6 +5,7 @@ import (
 	"github.com/nextdns/nextdns/host/service/ddwrt"
 	"github.com/nextdns/nextdns/host/service/edgeos"
 	"github.com/nextdns/nextdns/host/service/entware"
+	"github.com/nextdns/nextdns/host/service/firewalla"
 	"github.com/nextdns/nextdns/host/service/merlin"
 	"github.com/nextdns/nextdns/host/service/openrc"
 	"github.com/nextdns/nextdns/host/service/procd"
@@ -14,6 +15,7 @@ import (
 	"github.com/nextdns/nextdns/host/service/sysv"
 	"github.com/nextdns/nextdns/host/service/ubios"
 	"github.com/nextdns/nextdns/host/service/upstart"
+	"github.com/nextdns/nextdns/host/service/vyos"
 )
 
 func NewService(c service.Config) (service.Service, error) {
@@ -21,7 +23,14 @@ func NewService(c service.Config) (service.Service, error) {
 		// Needs to be before systemd
 		return s, nil
 	}
+	if s, err := firewalla.New(c); err == nil {
+		// Needs to be before systemd
+		return s, nil
+	}
 	if s, err := edgeos.New(c); err == nil {
+		return s, nil
+	}
+	if s, err := vyos.New(c); err == nil {
 		return s, nil
 	}
 	if s, err := systemd.New(c); err == nil {

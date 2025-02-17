@@ -11,8 +11,8 @@ package ubios
 
 import (
 	"bufio"
-	"io/ioutil"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/nextdns/nextdns/host/service"
@@ -24,8 +24,18 @@ type Service struct {
 	systemd.Service
 }
 
+func isUnifi() bool {
+	if st, _ := os.Stat("/data/unifi"); st != nil && st.IsDir() {
+		return true
+	}
+	if err := exec.Command("ubnt-device-info", "firmware").Run(); err == nil {
+		return true
+	}
+	return false
+}
+
 func New(c service.Config) (Service, error) {
-	if st, _ := os.Stat("/data/unifi"); st == nil {
+	if !isUnifi() {
 		return Service{}, service.ErrNotSupported
 	}
 	srv := Service{
@@ -61,7 +71,7 @@ func isContainerized() (bool, error) {
 }
 
 func (s Service) Install() error {
-	if err := ioutil.WriteFile("/data/nextdns", script, 0755); err != nil {
+	if err := os.WriteFile("/data/nextdns", script, 0755); err != nil {
 		return err
 	}
 	if err := internal.CreateWithTemplate(s.Path, tmpl, 0644, s.Config); err != nil {
@@ -80,15 +90,17 @@ func (s Service) Uninstall() error {
 
 var tmpl = `[Unit]
 Description={{.Description}}
-ConditionFileIsExecutable={{.Executable}}
-After=unifi.service
-Before=nss-lookup.target
-Wants=nss-lookup.target
+Wants=nss-lookup.target network-online.target
+After=nss-lookup.target network-online.target
 
 [Service]
 StartLimitInterval=5
 StartLimitBurst=10
 Environment={{.RunModeEnv}}=1
+{{- if not (.Config.HasFlag "podman") }}
+ExecStartPre=-/bin/cp -f {{.Executable}} /data/.nextdns-recover
+ExecStartPre=-/bin/cp -f /data/.nextdns-recover {{.Executable}}
+{{- end}}
 ExecStart={{.Executable}}{{range .Arguments}} {{.}}{{end}}
 {{- if (.Config.HasFlag "podman") }}
 ExecStartPost=ssh -oStrictHostKeyChecking=no 127.0.0.1 ln -sf /data/nextdns /usr/bin/nextdns
